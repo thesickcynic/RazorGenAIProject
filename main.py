@@ -1,40 +1,71 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, HttpUrl
 from typing import List, Dict, Any
+from huggingface_hub import InferenceClient
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(
-    title="URL to JSON Builder",
-    description="API for building JSON structure with multiple URLs",
+    title="URL to HuggingFace Inference",
+    description="API for processing images through HuggingFace model",
     version="1.0.0"
 )
+
+# Security configurations
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_TOKEN")
+MODEL_NAME = "Qwen/Qwen2-VL-7B-Instruct"
 
 
 class ImageURL(BaseModel):
     url: HttpUrl
 
 
-class ContentItem(BaseModel):
-    type: str
-    text: str | None = None
-    image_url: Dict[str, ImageURL] | None = None
-
-
 class URLRequest(BaseModel):
     urls: List[HttpUrl]
 
 
-@app.post("/build-json")
-async def build_json(request: URLRequest) -> List[Dict[str, Any]]:
-    """
-    Build JSON structure with a static text content and multiple image URLs
-    """
-    # Create the text content item
+class InferenceResponse(BaseModel):
+    model_response: str
+    input_messages: List[Dict[str, Any]]
+
+
+async def verify_api_key(api_key: str = Depends(API_KEY_HEADER)):
+    """Verify the API key provided in headers"""
+    if api_key != os.getenv("API_KEY"):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    return api_key
+
+
+def create_inference_client():
+    """Create a HuggingFace inference client"""
+    if not HUGGINGFACE_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="HuggingFace API key not configured"
+        )
+
+    return InferenceClient(
+        provider="hf-inference",
+        token=HUGGINGFACE_API_KEY
+    )
+
+
+
+def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
+    """Build the messages structure for the model input"""
     text_content = {
         "type": "text",
         "text": "Describe this image in one sentence."
     }
 
-    # Create image URL content items
     image_contents = [
         {
             "type": "image_url",
@@ -42,31 +73,60 @@ async def build_json(request: URLRequest) -> List[Dict[str, Any]]:
                 "url": str(url)
             }
         }
-        for url in request.urls
+        for url in urls
     ]
 
-    # Combine text and image contents
-    content = [text_content] + image_contents
+    return [{
+        "role": "user",
+        "content": [text_content] + image_contents
+    }]
 
-    # Create the final structure
-    json_structure = [
-        {
-            "role": "user",
-            "content": content
-        }
-    ]
 
-    return json_structure
+@app.post("/process-images", response_model=InferenceResponse)
+async def process_images(
+        request: URLRequest,
+        api_key: str = Depends(verify_api_key)
+) -> InferenceResponse:
+    """
+    Process images through HuggingFace model
+    """
+    try:
+        # Create inference client
+        client = create_inference_client()
+        print(client.health_check())
 
+        # Build messages structure
+        messages = build_messages(request.urls)
+        print(messages)
+        # Make inference request
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=500
+        )
+
+        # Extract model response
+        model_response = completion.choices[0].message.content
+
+        return InferenceResponse(
+            model_response=model_response,
+            input_messages=messages
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing inference request: {str(e)}"
+        )
 
 @app.get("/")
 async def root():
     """Root endpoint returning API information"""
     return {
-        "name": "URL to JSON Builder API",
+        "name": "URL to HuggingFace Inference API",
         "version": "1.0.0",
         "endpoints": {
-            "/build-json": "POST - Build JSON structure with URLs",
+            "/process-images": "POST - Process images through HuggingFace model",
             "/": "GET - This information"
         }
     }

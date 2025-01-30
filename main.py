@@ -8,6 +8,18 @@ import os
 from dotenv import load_dotenv
 from huggingface_hub import login
 from openai import OpenAI
+import os
+from azure.ai.vision.imageanalysis import ImageAnalysisClient
+from azure.ai.vision.imageanalysis.models import VisualFeatures
+from azure.core.credentials import AzureKeyCredential
+from typing import List, Dict, Union
+from PIL import Image
+import requests
+from io import BytesIO
+import base64
+import json
+
+
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +53,64 @@ client = InferenceClient(
 
 openAIClient = OpenAI()
 
+try:
+    AZURE_VISION_ENDPOINT = os.getenv("AZURE_VISION_ENDPOINT")
+    AZURE_VISION_KEY = os.getenv("AZURE_VISION_KEY")
+except KeyError:
+    print("Missing environment variable 'VISION_ENDPOINT' or 'VISION_KEY'")
+    print("Set them before running this sample.")
+    exit()
+
+# Create an Azure Image Analysis client
+azureImageClient = ImageAnalysisClient(
+    endpoint="https://razorgroup.cognitiveservices.azure.com/",
+    credential=AzureKeyCredential(AZURE_VISION_KEY)
+)
+
+maskingPayloadStub = {
+  "prompt": "Product",
+  "image": '',
+  "threshold": 0.2,
+  "invert_mask": False,
+  "return_mask": True,
+  "grow_mask": 20,
+  "seed": 468685,
+  "base64": True
+}
+
+def smart_crop_image(url):
+    result = azureImageClient.analyze_from_url(
+        image_url = url,
+        visual_features = [VisualFeatures.SMART_CROPS],
+        smart_crops_aspect_ratios = [1.0]
+    )
+    return result
+
+def get_image_mask(base64image):
+    api_key = os.getenv('SEGMIND_API_KEY')
+    url = "https://api.segmind.com/v1/automatic-mask-generator"
+
+    # Request payload
+    data = {
+      "prompt": "Product",
+      "image": base64image,
+      "threshold": 0.2,
+      "invert_mask": True,
+      "return_mask": True,
+      "grow_mask": 10,
+      "seed": 468685,
+      "base64": True
+    }
+
+    headers = {'x-api-key': api_key}
+    response = requests.post(url, json=data, headers=headers)
+    print(response)
+    print('xxxxxxxxxxxxxxxxxxxxxxxxx Agli line madarchod. xxxxxxxxxxxxxxxxxxxxx')
+    print(response.content)  # The response is the generated image
+    return json.loads(response.content)
+
+
+
 class ImageURL(BaseModel):
     url: HttpUrl
 
@@ -57,6 +127,17 @@ class ExpectedModelOutput(BaseModel):
     dimension: bool
     angle: bool
     lifestyle: bool
+
+
+class ImageAnalysisResult(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+# class MaskingModelResponse(BaseModel):
+#     base64
 
 # def create_inference_client():
 #     """Create a HuggingFace inference client"""
@@ -105,6 +186,85 @@ def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
     }]
 
 
+
+
+def crop_image_from_url(image_url, bbox):
+    """
+    Fetch an image from URL, crop it, and return as base64 string.
+
+    Args:
+        image_url (str): URL of the input image
+        bbox (dict): Dictionary containing x, y, w, h values for cropping
+
+    Returns:
+        str: Base64 encoded string of the cropped image
+    """
+    try:
+        # Fetch the image from URL
+        response = requests.get(image_url)
+        response.raise_for_status()
+
+        # Create an image object from the downloaded bytes
+        img = Image.open(BytesIO(response.content))
+
+        # Calculate the coordinates for cropping
+        left = bbox['x']
+        top = bbox['y']
+        right = left + bbox['w']
+        bottom = top + bbox['h']
+
+        # Crop the image
+        cropped_img = img.crop((left, top, right, bottom))
+
+        # Convert the cropped image to base64
+        buffered = BytesIO()
+        cropped_img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+        # return f"data:image/png;base64,{img_str}"
+        return img_str
+
+    except requests.RequestException as e:
+        print(f"Error fetching image: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"Error processing image: {str(e)}")
+        return None
+
+# @app.post("/smart-crop", response_model=dict)
+@app.post("/smart-crop", response_model = ImageAnalysisResult)
+async def process_smart_crop(image_data: ImageURL):
+    """
+    Process an image through Azure's smart crop functionality
+
+    Args:
+        image_data: Pydantic model containing the image URL
+
+    Returns:
+        dict: The smart crop analysis results from Azure
+    """
+    try:
+        # Call the smart crop function with the provided URL
+        result = smart_crop_image(str(image_data.url))
+        print(result)
+        actualResult = result['smartCropsResult']['values'][0]['boundingBox']
+        print(actualResult)
+        base64_cropped_image = (crop_image_from_url(image_url=(str(image_data.url)), bbox = actualResult))
+        base64_cropped_mask = get_image_mask(base64_cropped_image)
+        print(base64_cropped_mask.get('image',''))
+        print("Pahonch gaye neeche tak nacho BC")
+
+        # Convert the Azure response to a dictionary
+        # Note: We're converting to dict to ensure serializable response
+        return ImageAnalysisResult(
+            actualResult
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing image: {str(e)}"
+        )
 @app.post("/process-images", response_model=InferenceResponse)
 def process_images(
         request: URLRequest) -> InferenceResponse:

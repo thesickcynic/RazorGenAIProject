@@ -104,9 +104,6 @@ def get_image_mask(base64image):
 
     headers = {'x-api-key': api_key}
     response = requests.post(url, json=data, headers=headers)
-    print(response)
-    print('xxxxxxxxxxxxxxxxxxxxxxxxx Agli line madarchod. xxxxxxxxxxxxxxxxxxxxx')
-    print(response.content)  # The response is the generated image
     return json.loads(response.content)
 
 

@@ -9,6 +9,7 @@ import os
 from dotenv import load_dotenv
 from huggingface_hub import login
 from openai import OpenAI
+import os
 from azure.ai.vision.imageanalysis import ImageAnalysisClient
 from azure.ai.vision.imageanalysis.models import VisualFeatures
 from azure.core.credentials import AzureKeyCredential
@@ -19,40 +20,10 @@ from io import BytesIO
 import base64
 import json
 import numpy as np
-import logging
-import logging.handlers
-import time
-from datetime import datetime
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-# Create a custom logger
-logger = logging.getLogger('image-processing-api')
-
-# Create handlers
-file_handler = logging.handlers.RotatingFileHandler(
-    'api.log',
-    maxBytes=10485760,  # 10MB
-    backupCount=5
-)
-console_handler = logging.StreamHandler()
-
-# Create formatters and add it to handlers
-log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(log_format)
-console_handler.setFormatter(log_format)
-
-# Add handlers to the logger
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
 
 # Load environment variables
 load_dotenv()
-logger.info("Environment variables loaded")
 
 app = FastAPI(
     title="URL to HuggingFace Inference",
@@ -64,7 +35,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET","POST"],
     allow_headers=['*'],
     expose_headers=["*"]
 )
@@ -74,173 +45,298 @@ API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_TOKEN")
 MODEL_NAME = "gpt-4o-mini"
 
-logger.info(f"Initializing HuggingFace client with model: {MODEL_NAME}")
+
 client = InferenceClient(
-    provider="hf-inference",
-    api_key=HUGGINGFACE_API_KEY,
+	provider="hf-inference",
+	api_key=HUGGINGFACE_API_KEY,
     model=MODEL_NAME
 )
 
-logger.info("Initializing OpenAI client")
 openAIClient = OpenAI()
 
 try:
     AZURE_VISION_ENDPOINT = os.getenv("AZURE_VISION_ENDPOINT")
     AZURE_VISION_KEY = os.getenv("AZURE_VISION_KEY")
-    logger.info("Azure Vision credentials loaded successfully")
-except KeyError as e:
-    logger.error("Missing Azure Vision environment variables", exc_info=True)
+except KeyError:
     print("Missing environment variable 'VISION_ENDPOINT' or 'VISION_KEY'")
     exit()
 
 # Create an Azure Image Analysis client
-logger.info("Initializing Azure Image Analysis client")
 azureImageClient = ImageAnalysisClient(
     endpoint="https://razorgroup.cognitiveservices.azure.com/",
     credential=AzureKeyCredential(AZURE_VISION_KEY)
 )
 
 maskingPayloadStub = {
-    "prompt": "Product",
-    "image": '',
-    "threshold": 0.2,
-    "invert_mask": False,
-    "return_mask": True,
-    "grow_mask": 20,
-    "seed": 468685,
-    "base64": True
+  "prompt": "Product",
+  "image": '',
+  "threshold": 0.2,
+  "invert_mask": False,
+  "return_mask": True,
+  "grow_mask": 20,
+  "seed": 468685,
+  "base64": True
 }
 
-
 def smart_crop_image(url):
-    logger.info(f"Starting smart crop for image: {url}")
-    try:
-        result = azureImageClient.analyze_from_url(
-            image_url=url,
-            visual_features=[VisualFeatures.SMART_CROPS],
-            smart_crops_aspect_ratios=[1.0]
-        )
-        logger.info("Smart crop completed successfully")
-        logger.debug(f"Smart crop result: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Error in smart_crop_image: {str(e)}", exc_info=True)
-        raise
-
+    result = azureImageClient.analyze_from_url(
+        image_url = url,
+        visual_features = [VisualFeatures.SMART_CROPS],
+        smart_crops_aspect_ratios = [1.0]
+    )
+    return result
 
 def get_image_mask(base64image):
-    logger.info("Starting image mask generation")
-    try:
-        api_key = os.getenv('SEGMIND_API_KEY')
-        url = "https://api.segmind.com/v1/automatic-mask-generator"
+    api_key = os.getenv('SEGMIND_API_KEY')
+    url = "https://api.segmind.com/v1/automatic-mask-generator"
 
-        data = {
-            "prompt": "Product",
-            "image": base64image,
-            "threshold": 0.2,
-            "invert_mask": True,
-            "return_mask": True,
-            "grow_mask": 10,
-            "seed": 468685,
-            "base64": True
-        }
+    # Request payload
+    data = {
+      "prompt": "Product",
+      "image": base64image,
+      "threshold": 0.2,
+      "invert_mask": True,
+      "return_mask": True,
+      "grow_mask": 10,
+      "seed": 468685,
+      "base64": True
+    }
 
-        headers = {'x-api-key': api_key}
-        logger.debug(f"Sending request to Segmind API")
-        response = requests.post(url, json=data, headers=headers)
-        logger.info(f"Mask generation completed with status code: {response.status_code}")
-        return json.loads(response.content)
-    except Exception as e:
-        logger.error(f"Error in get_image_mask: {str(e)}", exc_info=True)
-        raise
+    headers = {'x-api-key': api_key}
+    response = requests.post(url, json=data, headers=headers)
+    return json.loads(response.content)
 
 
 def base64_to_png_bytes(base64_string: str, is_mask: bool = False) -> BytesIO:
-    logger.info(f"Converting base64 to PNG bytes (is_mask: {is_mask})")
-    try:
-        if "base64," in base64_string:
-            base64_string = base64_string.split("base64,")[1]
-        base64_string = base64_string.replace('\\n', '')
+    """
+    Convert base64 string to PNG bytes in memory with RGBA format
+    For masks, sets alpha channel to 0 for black pixels
 
-        image_data = base64.b64decode(base64_string)
-        image = Image.open(BytesIO(image_data))
+    Args:
+        base64_string (str): Base64 encoded image string
+        is_mask (bool): Whether this is a mask image
 
-        if is_mask:
-            if image.mode != 'RGBA':
-                image = image.convert('RGBA')
-            img_array = np.array(image)
-            luminance = (img_array[..., 0] * 0.299 +
-                         img_array[..., 1] * 0.587 +
-                         img_array[..., 2] * 0.114)
-            alpha = np.where(luminance > 50, 0, 255).astype(np.uint8)
-            img_array[..., 3] = alpha
-            image = Image.fromarray(img_array)
-        else:
-            if image.mode != 'RGBA':
-                image = image.convert('RGBA')
+    Returns:
+        BytesIO: PNG image in memory in RGBA format
+    """
+    # Clean the base64 string
+    if "base64," in base64_string:
+        base64_string = base64_string.split("base64,")[1]
+    base64_string = base64_string.replace('\\n', '')
 
-        png_buffer = BytesIO()
-        image.save(png_buffer, format='PNG')
-        png_buffer.seek(0)
-        png_buffer.name = 'image.png'
+    # Convert to bytes and create image
+    image_data = base64.b64decode(base64_string)
+    image = Image.open(BytesIO(image_data))
 
-        logger.info("Successfully converted base64 to PNG bytes")
-        return png_buffer
-    except Exception as e:
-        logger.error(f"Error in base64_to_png_bytes: {str(e)}", exc_info=True)
-        raise
+    if is_mask:
+        # Convert to RGBA if needed
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
 
+        # Get image data as numpy array
+        img_array = np.array(image)
+
+        # Calculate luminance (brightness) of RGB channels
+        # Using standard RGB to grayscale conversion weights
+        luminance = (img_array[..., 0] * 0.299 +
+                     img_array[..., 1] * 0.587 +
+                     img_array[..., 2] * 0.114)
+
+        # Create alpha channel: 0 for black pixels (low luminance), 255 for others
+        # You can adjust the threshold (here 50) as needed
+        alpha = np.where(luminance > 50, 0, 255).astype(np.uint8)
+
+        # Set the alpha channel
+        img_array[..., 3] = alpha
+
+        # Convert back to PIL Image
+        image = Image.fromarray(img_array)
+    else:
+        # For non-mask images, just convert to RGBA
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+
+    # Convert to PNG in memory
+    png_buffer = BytesIO()
+    image.save(png_buffer, format='PNG')
+    png_buffer.seek(0)
+    png_buffer.name = 'image.png'
+
+    return png_buffer
+
+class ImageURL(BaseModel):
+    url: HttpUrl
+
+
+class URLRequest(BaseModel):
+    urls: List[HttpUrl]
+
+
+class InferenceResponse(BaseModel):
+    model_response: str
+    input_messages: List[Dict[str, Any]]
+
+class ExpectedModelOutput(BaseModel):
+    dimension: bool
+    angle: bool
+    lifestyle: bool
+
+
+class ImageAnalysisResult(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class ImageEditRequest(BaseModel):
+    image: bytes
+    mask: bytes
+    prompt: str
+    n: int
+    size: str
+
+prompt =  "Replace the background with Christmas themed imagery in the style of vintage greeting cards. Keep it subtle to not interfere with the product image. Do not recreate the product in the generated portion. Ensure that the image has a posterised look."
+
+def create_image_edit_request(
+        base64_cropped_image: bytes,
+        base64_cropped_mask: bytes,
+        prompt: str = "Remove the background and replace it with Christmas themed imagery in the style of Hallmark greeting cards. Keep it subtle so as to not interfere with the actual product image.",
+        n: int = 1,
+        size: str = "512x512"
+) -> Dict[str, Any]:
+    """
+    Creates a request body for OpenAI's Image Editing API endpoint.
+
+    Args:
+        base64_cropped_image (str): Base64 encoded image string (without data URI prefix)
+        base64_cropped_mask (str): Base64 encoded mask string (without data URI prefix)
+        prompt (str): The prompt telling the model what edits to make
+        n (int): Number of images to generate
+        size (str): Size of the output image (1024x1024 or 1024x1792 or 1792x1024)
+        model (str): The model to use for image generation
+
+    Returns:
+        Dict[str, Any]: Formatted request body for the OpenAI API
+
+    Raises:
+        ValueError: If the input parameters are invalid
+    """
+    # Validate inputs
+    if not base64_cropped_image or not base64_cropped_mask:
+        raise ValueError("Both image and mask must be provided")
+
+    # Remove data URI prefix if present
+    def clean_base64(b64_string: str) -> str:
+        if "base64," in b64_string:
+            return b64_string.split("base64,")[1]
+        return b64_string
+
+    # Clean the base64 strings
+    clean_image = clean_base64(base64_cropped_image)
+    clean_mask = clean_base64(base64_cropped_mask)
+
+    # Create request body
+    request_body = ImageEditRequest(
+        image=clean_image,
+        mask=clean_mask,
+        prompt=prompt,
+        n=n,
+        size=size
+    )
+
+    return request_body.model_dump()
+
+def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
+    """Build the messages structure for the model input"""
+    text_content = {
+        "type": "text",
+        "text": "You are a panel of three experts on eCommerce conversion rate optimisation - Alice, Bob, "
+                "and Charles. You will be provided a set of images from product listings, you need to determine if "
+                "they meet a set of deadlines. You will do this via a panel discussion, trying to solve it step by "
+                "step and make sure that the result is correct."
+                "The guidelines are: 1. There should be one image with dimensions and details on it. 2. There should "
+                "be images from multiple angles. 3. There should be an image showing the product used in a lifestyle "
+                "setting. Once you have completed the evaluation, present the answer as a JSON object with parameters "
+                "as dimension, angle, and lifestyle with Boolean values. Only reply with the JSON object, nothing else."
+    }
+
+    image_contents = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": str(url)
+            }
+        }
+        for url in urls
+    ]
+
+    return [{
+        "role": "user",
+        "content": [text_content] + image_contents
+    }]
 
 def crop_image_from_url(image_url, bbox):
-    logger.info(f"Starting image crop from URL: {image_url}")
+    """
+    Fetch an image from URL, crop it, and return as base64 string.
+
+    Args:
+        image_url (str): URL of the input image
+        bbox (dict): Dictionary containing x, y, w, h values for cropping
+
+    Returns:
+        str: Base64 encoded string of the cropped image
+    """
     try:
+        # Fetch the image from URL
         response = requests.get(image_url)
         response.raise_for_status()
 
+        # Create an image object from the downloaded bytes
         img = Image.open(BytesIO(response.content))
 
+        # Calculate the coordinates for cropping
         left = bbox['x']
         top = bbox['y']
         right = left + bbox['w']
         bottom = top + bbox['h']
 
-        logger.debug(f"Cropping coordinates: left={left}, top={top}, right={right}, bottom={bottom}")
-
+        # Crop the image
         cropped_img = img.crop((left, top, right, bottom))
+
+        # Convert the cropped image to base64
         buffered = BytesIO()
         cropped_img.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        logger.info("Successfully cropped and encoded image")
+        # return f"data:image/png;base64,{img_str}"
         return img_str
+
     except requests.RequestException as e:
-        logger.error(f"Error fetching image: {str(e)}", exc_info=True)
+        print(f"Error fetching image: {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"Error processing image: {str(e)}", exc_info=True)
+        print(f"Error processing image: {str(e)}")
         return None
 
 
 @app.post("/generate_image_basic")
 async def process_smart_crop(image_data: ImageURL):
-    request_id = datetime.now().strftime('%Y%m%d-%H%M%S-') + str(time.time_ns())
-    logger.info(f"Starting image generation request {request_id} for URL: {image_data.url}")
     try:
+        # Get cropped image and mask
         result = smart_crop_image(str(image_data.url))
         actualResult = result['smartCropsResult']['values'][0]['boundingBox']
-        logger.info(f"Smart crop completed for request {request_id}")
 
         base64_cropped_image = crop_image_from_url(image_url=str(image_data.url), bbox=actualResult)
-        logger.info(f"Image cropping completed for request {request_id}")
-
         base64_cropped_mask = get_image_mask(base64_cropped_image).get('image', '')
-        logger.info(f"Mask generation completed for request {request_id}")
 
+        # Convert image and mask to proper PNG format in RGBA
+        # Pass is_mask=False for the main image
         png_image = base64_to_png_bytes(base64_cropped_image, is_mask=False)
+        # Pass is_mask=True for the mask to properly handle alpha channel
         png_mask = base64_to_png_bytes(base64_cropped_mask, is_mask=True)
-        logger.info(f"PNG conversion completed for request {request_id}")
 
-        logger.info(f"Sending request to OpenAI API for request {request_id}")
+        # Make the API call to OpenAI
         response = openAIClient.images.edit(
             image=png_image,
             mask=png_mask,
@@ -248,34 +344,31 @@ async def process_smart_crop(image_data: ImageURL):
             n=1,
             size="512x512"
         )
-        logger.info(f"OpenAI API response received for request {request_id}")
-        logger.debug(f"OpenAI API response: {response}")
         return response
     except Exception as e:
-        logger.error(f"Error in process_smart_crop for request {request_id}: {str(e)}", exc_info=True)
+        print(f"Detailed error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error processing image: {str(e)}"
         )
 
-
 @app.post("/process-images", response_model=InferenceResponse)
-def process_images(request: URLRequest) -> InferenceResponse:
-    request_id = datetime.now().strftime('%Y%m%d-%H%M%S-') + str(time.time_ns())
-    logger.info(f"Starting image processing request {request_id}")
+def process_images(
+        request: URLRequest) -> InferenceResponse:
+    """
+    Process images through HuggingFace model
+    """
     try:
+        # Build messages structure
         messages = build_messages(request.urls)
-        logger.info(f"Messages built for request {request_id}")
-        logger.debug(f"Input messages: {messages}")
-
+        # Make inference request
         completion = openAIClient.beta.chat.completions.parse(
             model=MODEL_NAME,
             messages=messages,
             response_format=ExpectedModelOutput
         )
-        logger.info(f"Model inference completed for request {request_id}")
-        logger.debug(f"Model response: {completion}")
 
+        # Extract model response
         model_response = completion.choices[0].message.content
 
         return InferenceResponse(
@@ -284,16 +377,14 @@ def process_images(request: URLRequest) -> InferenceResponse:
         )
 
     except Exception as e:
-        logger.error(f"Error in process_images for request {request_id}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Error processing request: {str(e)}"
+            detail=f"Ye phata: {str(e)}"
         )
-
 
 @app.get("/")
 async def root():
-    logger.info("Root endpoint accessed")
+    """Root endpoint returning API information"""
     return {
         "name": "URL to HuggingFace Inference API",
         "version": "1.0.0",
@@ -307,5 +398,4 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info("Starting API server")
     uvicorn.run(app, host="0.0.0.0", port=10000)

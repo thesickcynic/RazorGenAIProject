@@ -20,7 +20,7 @@ from io import BytesIO
 import base64
 import json
 import numpy as np
-
+from fastapi.responses import Response
 
 # Load environment variables
 load_dotenv()
@@ -35,7 +35,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
     allow_credentials=True,
-    allow_methods=["GET","POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=['*'],
     expose_headers=["*"]
 )
@@ -44,11 +44,48 @@ app.add_middleware(
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_TOKEN")
 MODEL_NAME = "gpt-4o-mini"
+base64_image_for_advanced = ""
+base64_mask_for_advanced = ""
 
+class ImageURL(BaseModel):
+    url: HttpUrl
+
+
+class URLRequest(BaseModel):
+    urls: List[HttpUrl]
+
+
+class InferenceResponse(BaseModel):
+    model_response: str
+    input_messages: List[Dict[str, Any]]
+
+
+class ExpectedModelOutput(BaseModel):
+    dimension: bool
+    angle: bool
+    lifestyle: bool
+
+class ExpectedRegenerationEvaluationModel(BaseModel):
+    isValid: bool
+    angle: str
+
+class ImageAnalysisResult(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class ImageEditRequest(BaseModel):
+    image: bytes
+    mask: bytes
+    prompt: str
+    n: int
+    size: str
 
 client = InferenceClient(
-	provider="hf-inference",
-	api_key=HUGGINGFACE_API_KEY,
+    provider="hf-inference",
+    api_key=HUGGINGFACE_API_KEY,
     model=MODEL_NAME
 )
 
@@ -68,23 +105,25 @@ azureImageClient = ImageAnalysisClient(
 )
 
 maskingPayloadStub = {
-  "prompt": "Product",
-  "image": '',
-  "threshold": 0.2,
-  "invert_mask": False,
-  "return_mask": True,
-  "grow_mask": 20,
-  "seed": 468685,
-  "base64": True
+    "prompt": "Product",
+    "image": '',
+    "threshold": 0.2,
+    "invert_mask": False,
+    "return_mask": True,
+    "grow_mask": 20,
+    "seed": 468685,
+    "base64": True
 }
+
 
 def smart_crop_image(url):
     result = azureImageClient.analyze_from_url(
-        image_url = url,
-        visual_features = [VisualFeatures.SMART_CROPS],
-        smart_crops_aspect_ratios = [1.0]
+        image_url=url,
+        visual_features=[VisualFeatures.SMART_CROPS],
+        smart_crops_aspect_ratios=[1.0]
     )
     return result
+
 
 def get_image_mask(base64image):
     api_key = os.getenv('SEGMIND_API_KEY')
@@ -92,14 +131,14 @@ def get_image_mask(base64image):
 
     # Request payload
     data = {
-      "prompt": "Product",
-      "image": base64image,
-      "threshold": 0.2,
-      "invert_mask": True,
-      "return_mask": True,
-      "grow_mask": 10,
-      "seed": 468685,
-      "base64": True
+        "prompt": "Product",
+        "image": base64image,
+        "threshold": 0.2,
+        "invert_mask": True,
+        "return_mask": True,
+        "grow_mask": 10,
+        "seed": 468685,
+        "base64": True
     }
 
     headers = {'x-api-key': api_key}
@@ -164,39 +203,10 @@ def base64_to_png_bytes(base64_string: str, is_mask: bool = False) -> BytesIO:
 
     return png_buffer
 
-class ImageURL(BaseModel):
-    url: HttpUrl
+prompt = (
+    "Replace the background with Christmas themed imagery in the style of vintage greeting cards. Do not modify the actual product. Do not recreate the product in the generated image. "
+    "Ensure there is no text on the image.")
 
-
-class URLRequest(BaseModel):
-    urls: List[HttpUrl]
-
-
-class InferenceResponse(BaseModel):
-    model_response: str
-    input_messages: List[Dict[str, Any]]
-
-class ExpectedModelOutput(BaseModel):
-    dimension: bool
-    angle: bool
-    lifestyle: bool
-
-
-class ImageAnalysisResult(BaseModel):
-    x: int
-    y: int
-    w: int
-    h: int
-
-
-class ImageEditRequest(BaseModel):
-    image: bytes
-    mask: bytes
-    prompt: str
-    n: int
-    size: str
-
-prompt =  "Replace the background with Christmas themed imagery in the style of vintage greeting cards. Keep it subtle to not interfere with the product image. Do not recreate the product in the generated portion. Ensure that the image has a posterised look."
 
 def create_image_edit_request(
         base64_cropped_image: bytes,
@@ -247,13 +257,14 @@ def create_image_edit_request(
 
     return request_body.model_dump()
 
+
 def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
     """Build the messages structure for the model input"""
     text_content = {
         "type": "text",
         "text": "You are a panel of three experts on eCommerce conversion rate optimisation - Alice, Bob, "
                 "and Charles. You will be provided a set of images from product listings, you need to determine if "
-                "they meet a set of deadlines. You will do this via a panel discussion, trying to solve it step by "
+                "they meet a set of guidelines. You will do this via a panel discussion, trying to solve it step by "
                 "step and make sure that the result is correct."
                 "The guidelines are: 1. There should be one image with dimensions and details on it. 2. There should "
                 "be images from multiple angles. 3. There should be an image showing the product used in a lifestyle "
@@ -275,6 +286,36 @@ def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
         "role": "user",
         "content": [text_content] + image_contents
     }]
+
+def build_messages_regeneration(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
+    """Build the messages structure for the model input"""
+    text_content = {
+        "type": "text",
+        "text": "You are a panel of three experts on eCommerce conversion rate optimisation and product photography - Alice, Bob, "
+                "and Charles. You will be provided an image from a product listing, you need to determine if "
+                "they meet a set of guidelines. You will do this via a panel discussion, trying to solve it step by "
+                "step and make sure that the result is correct."
+                "The guidelines are: 1. There should not be any AI generated artifacts. 2.The product should "
+                "be clearly visible. 3. The image should have Christmas themed imagery."
+                "Additionally, generate a short catchy message which could be put on the image. Once you have completed the evaluation, present the answer as a JSON object with parameters "
+                "as isValid with Boolean values and imageSlogan as a string. Only reply with the JSON object, nothing else."
+    }
+
+    image_contents = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": str(url)
+            }
+        }
+        for url in urls
+    ]
+
+    return [{
+        "role": "user",
+        "content": [text_content] + image_contents
+    }]
+
 
 def crop_image_from_url(image_url, bbox):
     """
@@ -330,6 +371,12 @@ async def process_smart_crop(image_data: ImageURL):
         base64_cropped_image = crop_image_from_url(image_url=str(image_data.url), bbox=actualResult)
         base64_cropped_mask = get_image_mask(base64_cropped_image).get('image', '')
 
+        global base64_image_for_advanced
+        base64_image_for_advanced = base64_cropped_image
+        global base64_mask_for_advanced
+        base64_mask_for_advanced = base64_cropped_mask
+
+
         # Convert image and mask to proper PNG format in RGBA
         # Pass is_mask=False for the main image
         png_image = base64_to_png_bytes(base64_cropped_image, is_mask=False)
@@ -352,6 +399,47 @@ async def process_smart_crop(image_data: ImageURL):
             detail=f"Error processing image: {str(e)}"
         )
 
+@app.post("/generate_image_advanced")
+async def process_smart_crop():
+    try:
+        api_key = os.getenv('SEGMIND_API_KEY')
+        url = "https://api.segmind.com/v1/sdxl-inpaint"
+        print(base64_image_for_advanced,base64_mask_for_advanced)
+        data = {
+            "prompt": "Remove the background and replace it with Christmas themed imagery in the style of Hallmark greeting cards. Keep it subtle so as to not interfere with the actual product image.",
+            "negative_prompt": "Disfigured, blurry, weird",
+            "samples": 1,
+            "image": base64_image_for_advanced,
+            # Or use image_file_to_base64("IMAGE_PATH")
+            "mask": base64_mask_for_advanced,
+            # Or use image_file_to_base64("IMAGE_PATH")
+            "scheduler": "DDIM",
+            "num_inference_steps": 25,
+            "guidance_scale": 7.5,
+            "strength": 1
+        }
+
+        headers = {'x-api-key': api_key}
+
+        response = requests.post(url, json=data, headers=headers)
+
+        # Parse the response content
+        response = requests.post(url, json=data, headers=headers)
+        response.raise_for_status()  # This will raise an exception for bad status codes
+
+        # Return the image response with proper content type
+        return Response(
+            content=response.content,
+            media_type="image/jpeg"
+        )
+    except Exception as e:
+        print(f"Detailed error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing image: {str(e)}"
+        )
+
+
 @app.post("/process-images", response_model=InferenceResponse)
 def process_images(
         request: URLRequest) -> InferenceResponse:
@@ -361,6 +449,36 @@ def process_images(
     try:
         # Build messages structure
         messages = build_messages(request.urls)
+        # Make inference request
+        completion = openAIClient.beta.chat.completions.parse(
+            model=MODEL_NAME,
+            messages=messages,
+            response_format=ExpectedModelOutput
+        )
+
+        # Extract model response
+        model_response = completion.choices[0].message.content
+
+        return InferenceResponse(
+            model_response=model_response,
+            input_messages=messages
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ye phata: {str(e)}"
+        )
+
+@app.post("/evaluate_generated_image", response_model=InferenceResponse)
+def process_images(
+        request: URLRequest) -> InferenceResponse:
+    """
+    Process images through HuggingFace model
+    """
+    try:
+        # Build messages structure
+        messages = build_messages_regeneration(request.urls)
         # Make inference request
         completion = openAIClient.beta.chat.completions.parse(
             model=MODEL_NAME,

@@ -239,11 +239,6 @@ def create_image_edit_request(
     clean_image = clean_base64(base64_cropped_image)
     clean_mask = clean_base64(base64_cropped_mask)
 
-    # Validate size
-    # valid_sizes = ["1024x1024", "1024x1792", "1792x1024"]
-    # if size not in valid_sizes:
-    #     raise ValueError(f"Size must be one of {valid_sizes}")
-
     # Create request body
     request_body = ImageEditRequest(
         image=clean_image,
@@ -254,26 +249,6 @@ def create_image_edit_request(
     )
 
     return request_body.model_dump()
-
-# class MaskingModelResponse(BaseModel):
-#     base64
-
-# def create_inference_client():
-#     """Create a HuggingFace inference client"""
-#     if not HUGGINGFACE_API_KEY:
-#         raise HTTPException(
-#             status_code=500,
-#             detail="HuggingFace API key not configured"
-#         )
-#
-#
-#     return InferenceClient(
-#         provider="hf-inference",
-#         token=HUGGINGFACE_API_KEY,
-#         model="Qwen/Qwen2-VL-7B-Instruct"
-#     )
-
-
 
 def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
     """Build the messages structure for the model input"""
@@ -303,9 +278,6 @@ def build_messages(urls: List[HttpUrl]) -> List[Dict[str, Any]]:
         "role": "user",
         "content": [text_content] + image_contents
     }]
-
-
-
 
 def crop_image_from_url(image_url, bbox):
     """
@@ -351,7 +323,7 @@ def crop_image_from_url(image_url, bbox):
         return None
 
 
-@app.post("/smart-crop")
+@app.post("/generate_image_basic")
 async def process_smart_crop(image_data: ImageURL):
     try:
         # Get cropped image and mask
@@ -375,79 +347,14 @@ async def process_smart_crop(image_data: ImageURL):
             n=1,
             size="512x512"
         )
-
         return response
-
     except Exception as e:
         print(f"Detailed error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error processing image: {str(e)}"
         )
-# @app.post("/smart-crop")
-# async def process_smart_crop(image_data: ImageURL):
-#     """
-#     Process an image through Azure's smart crop functionality
-#
-#     Args:
-#         image_data: Pydantic model containing the image URL
-#
-#     Returns:
-#         dict: The smart crop analysis results from Azure
-#     """
-#     try:
-#         # Call the smart crop function with the provided URL
-#         result = smart_crop_image(str(image_data.url))
-#         print(result)
-#         actualResult = result['smartCropsResult']['values'][0]['boundingBox']
-#         print(actualResult)
-#
-#         base64_cropped_image = (crop_image_from_url(image_url=(str(image_data.url)), bbox = actualResult))
-#         base64_cropped_mask = get_image_mask(base64_cropped_image).get('image','')
-#
-#         decoded_bytes_image = base64.b64decode(base64_cropped_image.replace('\\n', ''))
-#         # pngImageImage = Image.open(BytesIO(decoded_bytes_image))
-#         decoded_bytes_mask = base64.b64decode(base64_cropped_mask.replace('\\n', ''))
-#         # pngImageMask = Image.open(BytesIO(decoded_bytes_mask))
-#
-#         # Convert base64 strings to bytes
-#         image_bytes = base64_to_bytes(base64_cropped_image)
-#         mask_bytes = base64_to_bytes(base64_cropped_mask)
-#
-#         # Create BytesIO objects
-#         image_bytesio = BytesIO(image_bytes)
-#         mask_bytesio = BytesIO(mask_bytes)
-#
-#         # Set the file names (required by the OpenAI API)
-#         image_bytesio.name = "image.png"
-#         mask_bytesio.name = "mask.png"
-#
-#         print("Pahonch gaye neeche tak BC")
-#
-#         dalle_request_body = {
-#             "image": image_bytesio,
-#             "mask": mask_bytesio,
-#             "prompt": prompt,
-#             "n": 1,
-#             "size": "512x512"
-#         }
-#
-#         print("BRRRRRRRRRRRRRR")
-#
-#
-#
-#         # Make the API call to OpenAI
-#         response = openAIClient.images.edit(image=image_bytesio, mask=mask_bytesio, prompt=prompt, n=1, size="512x512")
-#
-#         print(base64_cropped_mask.get('image', ''))
-#         print("Pahonch gaye neeche tak nacho BC")
-#
-#         return response
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Error processing image: {str(e)}"
-#         )
+
 @app.post("/process-images", response_model=InferenceResponse)
 def process_images(
         request: URLRequest) -> InferenceResponse:

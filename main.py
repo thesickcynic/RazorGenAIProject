@@ -46,6 +46,7 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_TOKEN")
 MODEL_NAME = "gpt-4o-mini"
 base64_image_for_advanced = ""
 base64_mask_for_advanced = ""
+generated_image_url = ""
 
 class ImageURL(BaseModel):
     url: HttpUrl
@@ -483,7 +484,7 @@ def process_images(
         completion = openAIClient.beta.chat.completions.parse(
             model=MODEL_NAME,
             messages=messages,
-            response_format=ExpectedModelOutput
+            response_format=ExpectedRegenerationEvaluationModel
         )
 
         # Extract model response
